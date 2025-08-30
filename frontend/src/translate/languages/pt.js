@@ -965,6 +965,23 @@ const messages = {
           "Reabra ou aceite esse ticket para enviar uma mensagem.",
         signMessage: "Assinar",
       },
+      mediaModal: {
+        title: "Enviar Mídia",
+        caption: "Legenda (opcional)",
+        captionPlaceholder: "Digite uma legenda para o arquivo...",
+        addMore: "Adicionar mais",
+        dragDropText: "Solte os arquivos aqui para enviar",
+        buttons: {
+          cancel: "Cancelar",
+          send: "Enviar",
+        },
+        maxFiles: "Máximo de 10 arquivos permitidos",
+      },
+      messageSearch: {
+        placeholder: "Buscar mensagens...",
+        noResults: "Nenhuma mensagem encontrada",
+        searchButton: "Buscar mensagens",
+      },
       contactDrawer: {
         header: "Dados do contato",
         buttons: {

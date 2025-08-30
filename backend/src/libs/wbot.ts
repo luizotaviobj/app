@@ -10,12 +10,12 @@ import makeWASocket, {
   WAMessageKey,
   jidNormalizedUser,
   CacheStore
-} from "@whiskeysockets/baileys";
+} from "baileys";
 import { Op } from "sequelize";
 import { FindOptions } from "sequelize/types";
 import Whatsapp from "../models/Whatsapp";
 import { logger } from "../utils/logger";
-import MAIN_LOGGER from "@whiskeysockets/baileys/lib/Utils/logger";
+import MAIN_LOGGER from "baileys/lib/Utils/logger";
 import authState from "../helpers/authState";
 import { Boom } from "@hapi/boom";
 import AppError from "../errors/AppError";
@@ -78,6 +78,9 @@ export default function msg() {
 const sessions: Session[] = [];
 
 const retriesQrCodeMap = new Map<number, number>();
+
+// Contador de tentativas de reconexão para erro 403
+const reconnectAttempts = new Map<number, number>();
 
 export const getWbot = (whatsappId: number): Session => {
   const sessionIndex = sessions.findIndex(s => s.id === whatsappId);
@@ -191,21 +194,52 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
         wsocket.ev.on(
           "connection.update",
           async ({ connection, lastDisconnect, qr }) => {
-            logger.info(`Socket ${name} Connection Update ${connection || ""} ${lastDisconnect || ""}`);
+            logger.info(`Socket ${name} Connection Update: ${connection}`);
+            
+            // Log detalhado de desconexões
+            if (lastDisconnect) {
+              const error = lastDisconnect.error as Boom;
+              logger.warn(`Desconexão detectada para ${name}:`, {
+                statusCode: error?.output?.statusCode,
+                message: error?.message,
+                timestamp: new Date().toISOString()
+              });
+            }
 
+
+          
             const disconect = (lastDisconnect?.error as Boom)?.output?.statusCode;
 
             if (connection === "close") {
               if (disconect === 403) {
-                await whatsapp.update({ status: "PENDING", session: "", number: "" });
-                removeWbot(id, false);
-
-                await DeleteBaileysService(whatsapp.id);
-
-                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
-                  action: "update",
-                  session: whatsapp
-                });
+                logger.warn(`Erro 403 detectado para ${name}. Tentando reconexão inteligente...`);
+                
+                // NÃO deletar dados imediatamente - tentar reconectar primeiro
+                const attempts = reconnectAttempts.get(id) || 0;
+                
+                if (attempts < 5) { // Máximo 5 tentativas
+                  logger.info(`Tentativa ${attempts + 1} de reconexão para ${name}`);
+                  reconnectAttempts.set(id, attempts + 1);
+                  
+                  // Tentar reconectar sem deletar dados
+                  setTimeout(() => {
+                    StartWhatsAppSession(whatsapp, whatsapp.companyId);
+                  }, [2000, 5000, 10000, 30000, 60000][attempts]); // Delays progressivos
+                  
+                  return; // NÃO deletar dados ainda
+                } else {
+                  // Após 5 tentativas, então deletar dados
+                  logger.error(`Máximo de tentativas atingido para ${name}. Deletando sessão.`);
+                  await whatsapp.update({ status: "PENDING", session: "", number: "" });
+                  removeWbot(id, false);
+                  await DeleteBaileysService(whatsapp.id);
+                  reconnectAttempts.delete(id);
+                  
+                  io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
+                    action: "update",
+                    session: whatsapp
+                  });
+                }
               }
 
               if (disconect !== DisconnectReason.loggedOut) {
@@ -225,6 +259,9 @@ export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
             }
 
             if (connection === "open") {
+              // Limpar tentativas de reconexão quando conectar com sucesso
+              reconnectAttempts.delete(id);
+              
               await whatsapp.update({
                 status: "CONNECTED",
                 qrcode: "",

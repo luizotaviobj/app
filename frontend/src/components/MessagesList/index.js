@@ -18,6 +18,7 @@ import {
   ExpandMore,
   GetApp,
   Reply,
+  KeyboardArrowDown,
 } from "@material-ui/icons";
 import AudioModal from "../AudioModal";
 import MarkdownWrapper from "../MarkdownWrapper";
@@ -85,8 +86,8 @@ const useStyles = makeStyles((theme) => ({
       right: 0,
     },
     whiteSpace: "pre-wrap",
-    backgroundColor: "#ffffff",
-    color: "#303030",
+    backgroundColor: theme.palette.messageout || "#ffffff",
+    color: theme.palette.text.primary || "#303030",
     alignSelf: "flex-start",
     borderTopLeftRadius: 0,
     borderTopRightRadius: 8,
@@ -262,6 +263,33 @@ const useStyles = makeStyles((theme) => ({
     backgroundColor: theme.mode === 'light' ? '#2DDD7F' : '#1c1c1c',
     color: theme.mode === 'light' ? '#2DDD7F' : '#FFF',
   },
+  scrollToBottomButton: {
+    position: "absolute",
+    bottom: 20,
+    right: 20,
+    backgroundColor: theme.palette.background.paper,
+    color: theme.palette.text.primary,
+    boxShadow: "0 2px 10px rgba(0,0,0,0.2)",
+    zIndex: 1000,
+    transition: "all 0.3s ease",
+    opacity: 1,
+    "&:hover": {
+      backgroundColor: theme.palette.mode === 'light' ? '#f5f5f5' : '#424242',
+      transform: "scale(1.1)",
+      boxShadow: "0 4px 15px rgba(0,0,0,0.3)",
+    },
+    "&:active": {
+      transform: "scale(0.95)",
+    },
+  },
+  scrollToBottomButtonHidden: {
+    opacity: 0,
+    pointerEvents: "none",
+    transform: "scale(0.8)",
+    "&:hover": {
+      opacity: 0, // Garante que não apareça no hover quando escondido
+    },
+  },
 }));
 
 const reducer = (state, action) => {
@@ -317,7 +345,7 @@ const reducer = (state, action) => {
   }
 };
 
-const MessagesList = ({ ticket, ticketId, isGroup }) => {
+const MessagesList = ({ ticket, ticketId, isGroup, onMessagesLoad }) => {
   const classes = useStyles();
   const [messagesList, dispatch] = useReducer(reducer, []);
   const [pageNumber, setPageNumber] = useState(1);
@@ -329,7 +357,10 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
   const messageOptionsMenuOpen = Boolean(anchorEl);
   const currentTicketId = useRef(ticketId);
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const messagesListRef = useRef();
   const socketManager = useContext(SocketContext);
+  const scrollTimeoutRef = useRef();
   const { setReplyingMessage } = useContext(ReplyMessageContext);
   const { showSelectMessageCheckbox } = useContext(ForwardMessageContext);
 
@@ -338,6 +369,12 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
     setPageNumber(1);
     currentTicketId.current = ticketId;
   }, [ticketId]);
+
+  useEffect(() => {
+    if (onMessagesLoad && messagesList.length > 0) {
+      onMessagesLoad(messagesList);
+    }
+  }, [messagesList, onMessagesLoad]);
 
   useEffect(() => {
     setLoading(true);
@@ -399,11 +436,28 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
 
     return () => {
       socket.disconnect();
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
     };
   }, [ticketId, ticket, socketManager]);
 
   const loadMore = () => {
-    setPageNumber((prevPageNumber) => prevPageNumber + 1);
+    const messagesContainer = document.getElementById("messagesList");
+    const scrollHeightBefore = messagesContainer?.scrollHeight || 0;
+    
+    setPageNumber((prevPageNumber) => {
+      // Preserva a posição do scroll após carregar novas mensagens
+      setTimeout(() => {
+        if (messagesContainer) {
+          const scrollHeightAfter = messagesContainer.scrollHeight;
+          const scrollDiff = scrollHeightAfter - scrollHeightBefore;
+          messagesContainer.scrollTop += scrollDiff;
+        }
+      }, 100);
+      
+      return prevPageNumber + 1;
+    });
   };
 
   const scrollToBottom = () => {
@@ -413,20 +467,24 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
   };
 
   const handleScroll = (e) => {
-    if (!hasMore) return;
-    const { scrollTop } = e.currentTarget;
-
-    if (scrollTop === 0) {
-      document.getElementById("messagesList").scrollTop = 1;
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    
+    // Debounce para evitar múltiplas chamadas
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
     }
+    
+    scrollTimeoutRef.current = setTimeout(() => {
+      // Lógica para carregar mais mensagens antigas quando rolar para cima
+      if (hasMore && !loading && scrollTop < 100) {
+        console.log("Carregando mais mensagens antigas...", { hasMore, loading, scrollTop });
+        loadMore();
+      }
+    }, 100);
 
-    if (loading) {
-      return;
-    }
-
-    if (scrollTop < 50) {
-      loadMore();
-    }
+    // Lógica para mostrar/esconder botão de scroll to bottom (sem debounce para ser mais responsivo)
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
+    setShowScrollToBottom(!isNearBottom);
   };
 
   const hanldeReplyMessage = (e, message) => {
@@ -712,6 +770,7 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
               {renderNumberTicket(message, index)}
               {renderMessageDivider(message, index)}
               <div
+                id={`message-${message.id}`}
                 className={classes.messageLeft}
                 title={message.queueId && message.queue?.name}
                 onDoubleClick={(e) => hanldeReplyMessage(e, message)}
@@ -721,6 +780,7 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
                     message={message}
                   />
                 )}
+                
                 <IconButton
                   variant="contained"
                   size="small"
@@ -764,7 +824,7 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
                   {message.quotedMsg && renderQuotedMessage(message)}
                   {message.mediaType !== "reactionMessage" && (
                     <MarkdownWrapper>
-                      {message.mediaType === "locationMessage" || message.mediaType === "contactMessage" 
+                      {message.mediaType === "locationMessage" || message.mediaType === "contactMessage"
                         ? null
                         : message.body}
                     </MarkdownWrapper>
@@ -792,14 +852,17 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
               {renderDailyTimestamps(message, index)}
               {renderNumberTicket(message, index)}
               {renderMessageDivider(message, index)}
-              <div className={classes.messageRight}
-              onDoubleClick={(e) => hanldeReplyMessage(e, message)}
-            >
+              <div 
+                id={`message-${message.id}`}
+                className={classes.messageRight}
+                onDoubleClick={(e) => hanldeReplyMessage(e, message)}
+              >
               {showSelectMessageCheckbox && (
                 <SelectMessageCheckbox
                   message={message}
                 />
               )}
+              
                 <IconButton
                   variant="contained"
                   size="small"
@@ -835,7 +898,7 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
                     />
                   )}
                   {message.quotedMsg && renderQuotedMessage(message)}
-                  {message.mediaType !== "reactionMessage" && message.mediaType !== "locationMessage" && (
+                  {message.mediaType !== "reactionMessage" && message.mediaType !== "locationMessage" && message.mediaType !== "contactMessage" && (
                     <MarkdownWrapper>{message.body}</MarkdownWrapper>
                   )}
                   {message.quotedMsg && message.mediaType === "reactionMessage" && (
@@ -876,6 +939,7 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
         id="messagesList"
         className={classes.messagesList}
         onScroll={handleScroll}
+        ref={messagesListRef}
       >
         {messagesList.length > 0 ? renderMessages() : []}
       </div>
@@ -884,6 +948,17 @@ const MessagesList = ({ ticket, ticketId, isGroup }) => {
           <CircularProgress className={classes.circleLoading} />
         </div>
       )}
+      
+      {/* Botão de scroll para última mensagem */}
+      <IconButton
+        className={clsx(classes.scrollToBottomButton, {
+          [classes.scrollToBottomButtonHidden]: !showScrollToBottom
+        })}
+        onClick={scrollToBottom}
+        title="Ir para última mensagem"
+      >
+        <KeyboardArrowDown />
+      </IconButton>
     </div>
   );
 };

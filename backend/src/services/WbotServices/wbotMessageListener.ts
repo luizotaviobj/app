@@ -19,7 +19,7 @@ import {
   delay,
   Chat,
   WASocket,
-} from "@whiskeysockets/baileys";
+} from "baileys";
 import Contact from "../../models/Contact";
 import Message from "../../models/Message";
 import Ticket from "../../models/Ticket";
@@ -111,6 +111,89 @@ const writeFileAsync = promisify(writeFile);
 const wbotMutex = new Mutex();
 
 const groupContactCache = new SimpleObjectCache(1000 * 30, logger);
+
+// Função para normalizar e unificar JID/LID
+const normalizeContactIdentifier = (message: WAMessage): string => {
+  const { key } = message;
+  const { remoteJid, senderPn, senderLid, participant, participantPn, participantLid } = key;
+  
+  // Prioridade: JID > LID > PN
+  if (remoteJid && remoteJid.includes('@s.whatsapp.net')) {
+    return remoteJid;
+  }
+  if (senderPn && senderPn.includes('@s.whatsapp.net')) {
+    return senderPn;
+  }
+  if (participant && participant.includes('@s.whatsapp.net')) {
+    return participant;
+  }
+
+  if (participantPn && participantPn.includes('@s.whatsapp.net')) {
+    return participantPn;
+  }
+
+  if (participantLid && participantLid.includes('@s.whatsapp.net')) {
+    return participantLid;
+  }
+  
+  if (senderLid && senderLid.includes('@s.whatsapp.net')) {
+    return senderLid;
+  }
+  
+  
+  
+  
+  return remoteJid || '';
+};
+
+// Função para normalizar JID removendo sufixos
+const normalizeJid = (jid: string): string => {
+  if (!jid) return '';
+  return jid.replace(/@[^.]+\.whatsapp\.net$/, '@s.whatsapp.net');
+};
+
+// Função para unificar contatos duplicados
+const unifyDuplicateContacts = async (companyId: number): Promise<void> => {
+  try {
+    const contacts = await Contact.findAll({
+      where: { companyId },
+      order: [['createdAt', 'ASC']]
+    });
+    
+    const jidMap = new Map<string, Contact>();
+    
+    for (const contact of contacts) {
+      const normalizedJid = normalizeJid(contact.number);
+      
+      if (jidMap.has(normalizedJid)) {
+        // Unificar com contato existente
+        const existingContact = jidMap.get(normalizedJid)!;
+        
+        // Atualizar tickets para usar o contato principal
+        await Ticket.update(
+          { contactId: existingContact.id },
+          { where: { contactId: contact.id, companyId } }
+        );
+        
+        // Atualizar mensagens para usar o contato principal
+        await Message.update(
+          { contactId: existingContact.id },
+          { where: { contactId: contact.id, companyId } }
+        );
+        
+        // Deletar contato duplicado
+        await contact.destroy();
+        
+        logger.info(`Contato duplicado unificado: ${contact.number} -> ${existingContact.number}`);
+      } else {
+        jidMap.set(normalizedJid, contact);
+      }
+    }
+  } catch (error) {
+    logger.error(`Erro ao unificar contatos duplicados: ${error}`);
+    Sentry.captureException(error);
+  }
+};
 
 const multVecardGet = function (param: any) {
   let output = " "
@@ -483,16 +566,27 @@ const getSenderMessage = (
   return senderId && jidNormalizedUser(senderId);
 };
 
-const getContactMessage = async (msg: proto.IWebMessageInfo, wbot: Session) => {
+const getContactMessage = async (msg: WAMessage, wbot: Session) => {
   const isGroup = msg.key.remoteJid.includes("g.us");
   const rawNumber = msg.key.remoteJid.replace(/\D/g, "");
+  
+  // Normalizar o identificador do contato
+  const normalizedId = normalizeContactIdentifier(msg);
+  console.log('normalizedId:::::', normalizedId)
+  console.log('msg.key.remoteJid:::::', msg.key.remoteJid)
+  console.log('msg.key.participant:::::', msg.key.participant)
+  console.log('msg.key.senderPn:::::', msg.key.senderPn)
+  console.log('msg.key.senderLid:::::', msg.key.senderLid)
+  console.log('msg.key.participantPn:::::', msg.key.participantPn)
+  console.log('msg.key.participantLid:::::', msg.key.participantLid)
+  
   return isGroup
     ? {
       id: getSenderMessage(msg, wbot),
       name: msg.pushName
     }
     : {
-      id: msg.key.remoteJid,
+      id: normalizedId,
       name: msg.key.fromMe ? rawNumber : msg.pushName
     };
 };
@@ -559,16 +653,17 @@ const verifyContact = async (
     profilePicUrl = `${process.env.FRONTEND_URL}/nopicture.png`;
   }
 
+  // Normalizar o número do contato
+  const normalizedNumber = normalizeJid(msgContact.id.replace(/\D/g, ""));
+
   const contactData = {
     name: msgContact?.name || msgContact.id.replace(/\D/g, ""),
-    number: msgContact.id.replace(/\D/g, ""),
+    number: normalizedNumber,
     profilePicUrl,
     isGroup: msgContact.id.includes("g.us"),
     companyId,
     whatsappId: wbot.id
   };
-
-
 
   const contact = CreateOrUpdateContactService(contactData);
 
@@ -942,7 +1037,7 @@ const verifyMediaMessage = async (
     id: msg.key.id,
     ticketId: ticket.id,
     contactId: msg.key.fromMe ? undefined : contact.id,
-    body: body ? formatBody(body, ticket.contact) : media.filename,
+    body: body ? formatBody(body, ticket.contact) : "",
     fromMe: msg.key.fromMe,
     read: msg.key.fromMe,
     mediaUrl: media.filename,
@@ -955,7 +1050,7 @@ const verifyMediaMessage = async (
   };
 
   await ticket.update({
-    lastMessage: body || media.filename,
+    lastMessage: body || "📎 Mídia",
   });
 
   const newMessage = await CreateMessageService({
@@ -1892,6 +1987,12 @@ const handleMessage = async (
   try {
     let msgContact: IMe;
     let groupContact: Contact | undefined;
+    
+    // Executar unificação de contatos duplicados periodicamente (a cada 1000 mensagens)
+    const messageCount = await Message.count({ where: { companyId } });
+    if (messageCount % 1000 === 0) {
+      await unifyDuplicateContacts(companyId);
+    }
 
     const isGroup = msg.key.remoteJid?.endsWith("@g.us");
 
@@ -1946,6 +2047,13 @@ const handleMessage = async (
 
     const whatsapp = await ShowWhatsAppService(wbot.id!, companyId);
     const contact = await verifyContact(msgContact, wbot, companyId);
+    
+    // Log para monitorar normalização
+    const originalJid = msgContact.id;
+    const normalizedJid = contact.number;
+    if (originalJid !== normalizedJid) {
+      logger.info(`JID normalizado: ${originalJid} -> ${normalizedJid}`);
+    }
 
     let unreadMessages = 0;
 
@@ -2564,16 +2672,36 @@ const wbotMessageListener = async (wbot: Session, companyId: number): Promise<vo
     };
 
     setInterval(processMessageQueue, 100);
-
-    wbot.ev.on("messages.upsert", async (messageUpsert: ImessageUpsert) => {
-      const messages = messageUpsert.messages
+    
+    wbot.ev.on("messages.upsert", async (
+      { messages, type, requestId }: { messages: WAMessage[]; type: MessageUpsertType; requestId?: string }
+    ) => {
+      messages
         .filter(filterMessages)
         .map(msg => msg);
+        console.log('messages.upsert:::::', messages)
+
+        const message = messages[0]
+        console.log('key:::::', message.key)
 
       if (!messages?.length) return;
 
       messageQueue.push(...messages);
     });
+
+    // wbot.ev.on("messages.upsert", async (messageUpsert: ImessageUpsert) => {
+    //   const messages = messageUpsert.messages
+    //     .filter(filterMessages)
+    //     .map(msg => msg);
+    //     console.log('messages.upsert:::::', messages)
+
+    //     const message = messages[0]
+    //     console.log('key:::::', message.key)
+
+    //   if (!messages?.length) return;
+
+    //   messageQueue.push(...messages);
+    // });
 
     wbot.ev.on("messages.update", async (messageUpdate: WAMessageUpdate[]) => {
       if (!messageUpdate?.length) return;

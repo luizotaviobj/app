@@ -160,7 +160,7 @@ export const send = async (req: Request, res: Response): Promise<Response> => {
               whatsappId,
               data: {
                 number,
-                body: body ? formatBody(body, contact) : media.originalname,
+                body: body ? formatBody(body, contact) : "",
                 mediaPath: media.path,
                 fileName: media.originalname
               }
